@@ -1,0 +1,11 @@
+# Production Dependencies
+requests>=2.31.0          # HTTP client for API calls
+python-dotenv>=1.0.0      # Environment variable loading
+pydantic>=2.0.0           # Data validation and serialization
+jsonschema>=4.19.0        # SARIF schema validation
+
+# Development Dependencies
+pytest>=7.4.0             # Testing framework
+pytest-mock>=3.11.1       # Mocking for tests
+black>=23.7.0             # Code formatting
+mypy>=1.5.0               # Static type checking

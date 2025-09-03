@@ -1,0 +1,6 @@
+Things for nitin to investigate:
+* how do i check if the sarif file generated is correct- investigate if we can use the SARIF upload and see if the findings show up into GH
+    * research SARIF linters and checkers online
+
+
+    

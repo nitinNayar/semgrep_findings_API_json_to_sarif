@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:semgrep.dev)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.oasis-open.org)",
+      "Bash(pip install:*)",
+      "Bash(semgrep-to-sarif:*)",
+      "Bash(python:*)",
+      "Bash(source:*)",
+      "Bash(chmod:*)",
+      "WebFetch(domain:schemastore.org)",
+      "Read(/tmp/**)",
+      "Read(/tmp/**)",
+      "Read(/tmp/**)",
+      "Read(/tmp/**)",
+      "Read(/tmp/**)",
+      "Bash(find:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

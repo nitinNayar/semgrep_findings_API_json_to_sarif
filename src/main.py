@@ -64,7 +64,9 @@ def main() -> int:
                 api_token=config.api_token,
                 deployment_slug=config.deployment_slug,
                 deployment_id=config.deployment_id,
-                repository_ids=config.list_of_repo_ids if config.filter_findings_for_specific_repo_ids else None
+                repository_ids=config.list_of_repo_ids if config.filter_findings_for_specific_repo_ids else None,
+                page_size=config.semgrep_page_size,
+                max_pages=config.semgrep_max_pages
             )
             
             v1_findings, v2_findings = api_facade.fetch_all_findings_with_details()
@@ -82,7 +84,7 @@ def main() -> int:
         # Step 6: Transform to SARIF
         logger.info("Step 6: Transforming findings to SARIF format")
         try:
-            transformer = SARIFTransformer()
+            transformer = SARIFTransformer(config.deployment_slug)
             sarif_report = transformer.transform(v1_findings, v2_findings)
             
             logger.info(f"SARIF transformation complete")

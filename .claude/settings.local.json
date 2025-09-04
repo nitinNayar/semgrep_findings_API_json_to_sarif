@@ -16,7 +16,11 @@
       "Read(/tmp/**)",
       "Read(/tmp/**)",
       "Read(/tmp/**)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "Read(/Users/nitinnayar/projects/semgrep_findings_API_json_to_SARIF/specs/**)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []

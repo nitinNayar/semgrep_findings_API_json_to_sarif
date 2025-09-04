@@ -58,6 +58,12 @@ class SemgrepV1Finding(BaseModel):
 class SemgrepV1Response(BaseModel):
     """Response from Semgrep V1 findings API."""
     findings: List[SemgrepV1Finding]
+    
+    # Optional pagination metadata (if provided by API)
+    total_count: Optional[int] = None
+    page: Optional[int] = None
+    page_size: Optional[int] = None
+    has_more: Optional[bool] = None
 
 
 # Semgrep V2 API Models
@@ -267,14 +273,42 @@ class SARIFRule(BaseModel):
     properties: Optional[Dict[str, Any]] = None
 
 
+class SARIFSuppression(BaseModel):
+    """SARIF suppression for false positives."""
+    kind: str  # Required: "inSource" for AI-detected false positives
+    status: str  # Required: "accepted" for AI-verified suppressions
+    justification: Optional[SARIFMessage] = None
+
+
+class SARIFReplacement(BaseModel):
+    """SARIF replacement for fixes."""
+    deletedRegion: SARIFRegion
+    insertedContent: Dict[str, str]  # {"text": "replacement content"}
+
+
+class SARIFArtifactChange(BaseModel):
+    """SARIF artifact change for fixes."""
+    artifactLocation: SARIFArtifactLocation
+    replacements: List[SARIFReplacement]
+
+
+class SARIFFix(BaseModel):
+    """SARIF fix recommendation."""
+    description: Optional[SARIFMessage] = None
+    artifactChanges: List[SARIFArtifactChange]
+
+
 class SARIFResult(BaseModel):
     """SARIF result."""
     ruleId: str
     level: SARIFLevel
     message: SARIFMessage
     locations: List[SARIFLocation]
+    guid: Optional[str] = None
     fingerprints: Optional[Dict[str, str]] = None
     codeFlows: Optional[List[SARIFCodeFlow]] = None
+    suppressions: Optional[List[SARIFSuppression]] = None
+    fixes: Optional[List[SARIFFix]] = None
     properties: Optional[Dict[str, Any]] = None
     
     class Config:

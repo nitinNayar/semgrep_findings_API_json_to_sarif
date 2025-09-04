@@ -147,41 +147,89 @@ class SemgrepV1Client(SemgrepClient):
         """Initialize V1 API client."""
         super().__init__(api_token, "https://semgrep.dev/api")
     
-    def get_findings(self, deployment_slug: str, repository_ids: Optional[List[int]] = None) -> List[SemgrepV1Finding]:
-        """Fetch findings for a deployment using V1 API.
+    def get_findings(self, deployment_slug: str, repository_ids: Optional[List[int]] = None, page_size: int = 100, max_pages: int = 1000) -> List[SemgrepV1Finding]:
+        """Fetch ALL findings for a deployment using V1 API with pagination.
         
         Args:
             deployment_slug: Deployment slug identifier
             repository_ids: Optional list of repository IDs to filter by
+            page_size: Number of findings per page (default 100, max recommended 1000)
+            max_pages: Maximum number of pages to fetch (safety limit)
             
         Returns:
-            List of V1 findings
+            Complete list of ALL V1 findings from all pages
         """
-        url = f"{self.base_url}/v1/deployments/{deployment_slug}/findings"
+        base_url = f"{self.base_url}/v1/deployments/{deployment_slug}/findings"
         
-        # Add repository_ids query parameter if provided
-        params = {}
+        # Base parameters
+        base_params = {}
         if repository_ids:
             # Convert list of integers to comma-separated string
-            params['repository_ids'] = ','.join(map(str, repository_ids))
-            self.logger.info(f"Fetching V1 findings for deployment: {deployment_slug}, filtered by repository IDs: {repository_ids}")
+            base_params['repository_ids'] = ','.join(map(str, repository_ids))
+            self.logger.info(f"Fetching ALL V1 findings for deployment: {deployment_slug}, filtered by repository IDs: {repository_ids}")
         else:
-            self.logger.info(f"Fetching V1 findings for deployment: {deployment_slug} (all repositories)")
+            self.logger.info(f"Fetching ALL V1 findings for deployment: {deployment_slug} (all repositories)")
+        
+        # Add page size to parameters
+        base_params['page_size'] = str(page_size)
+        
+        all_findings = []
+        page = 0
+        
+        self.logger.info(f"Starting paginated retrieval with page_size={page_size}")
         
         try:
-            response_data = self._make_request("GET", url, params=params)
+            while page < max_pages:
+                # Set current page parameter
+                params = base_params.copy()
+                params['page'] = str(page)
+                
+                self.logger.debug(f"Fetching page {page} (up to {page_size} findings)")
+                
+                try:
+                    response_data = self._make_request("GET", base_url, params=params)
+                    
+                    # Parse response using Pydantic model
+                    v1_response = SemgrepV1Response(**response_data)
+                    
+                    current_page_count = len(v1_response.findings)
+                    all_findings.extend(v1_response.findings)
+                    
+                    self.logger.info(f"Page {page}: Retrieved {current_page_count} findings (total so far: {len(all_findings)})")
+                    
+                    # Check if this is the last page
+                    if current_page_count < page_size:
+                        self.logger.info(f"Reached last page {page} (got {current_page_count} < {page_size} findings)")
+                        break
+                    
+                    # Check for explicit has_more flag if provided by API
+                    if hasattr(v1_response, 'has_more') and v1_response.has_more is False:
+                        self.logger.info(f"API indicated no more pages after page {page}")
+                        break
+                        
+                    page += 1
+                    
+                except Exception as page_error:
+                    self.logger.error(f"Failed to fetch page {page}: {page_error}")
+                    # For now, break on page errors. Could implement retry logic here.
+                    break
             
-            # Parse response using Pydantic model
-            v1_response = SemgrepV1Response(**response_data)
+            if page >= max_pages:
+                self.logger.warning(f"Hit maximum page limit ({max_pages}). There may be more findings.")
             
+            # Final summary
             if repository_ids:
-                self.logger.info(f"Retrieved {len(v1_response.findings)} findings from V1 API (filtered by {len(repository_ids)} repository IDs)")
+                self.logger.info(f"PAGINATION COMPLETE: Retrieved {len(all_findings)} total findings from {page + 1} pages (filtered by {len(repository_ids)} repository IDs)")
             else:
-                self.logger.info(f"Retrieved {len(v1_response.findings)} findings from V1 API")
+                self.logger.info(f"PAGINATION COMPLETE: Retrieved {len(all_findings)} total findings from {page + 1} pages (all repositories)")
             
-            return v1_response.findings
+            return all_findings
+            
         except Exception as e:
-            self.logger.error(f"Failed to fetch V1 findings: {e}")
+            self.logger.error(f"Failed to fetch V1 findings with pagination: {e}")
+            if all_findings:
+                self.logger.info(f"Returning partial results: {len(all_findings)} findings retrieved before error")
+                return all_findings
             raise
 
 
@@ -259,7 +307,7 @@ class SemgrepV2Client(SemgrepClient):
 class SemgrepAPIFacade:
     """Facade that combines V1 and V2 API clients for the complete workflow."""
     
-    def __init__(self, api_token: str, deployment_slug: str, deployment_id: str, repository_ids: Optional[List[int]] = None):
+    def __init__(self, api_token: str, deployment_slug: str, deployment_id: str, repository_ids: Optional[List[int]] = None, page_size: int = 100, max_pages: int = 1000):
         """Initialize the API facade.
         
         Args:
@@ -267,10 +315,14 @@ class SemgrepAPIFacade:
             deployment_slug: Deployment slug for V1 API
             deployment_id: Deployment ID for V2 API
             repository_ids: Optional list of repository IDs to filter by
+            page_size: Number of findings per API page
+            max_pages: Maximum number of pages to fetch
         """
         self.deployment_slug = deployment_slug
         self.deployment_id = deployment_id
         self.repository_ids = repository_ids
+        self.page_size = page_size
+        self.max_pages = max_pages
         self.logger = logging.getLogger(__name__)
         
         self.v1_client = SemgrepV1Client(api_token)
@@ -295,7 +347,7 @@ class SemgrepAPIFacade:
             self.logger.info(f"Step 1: Fetching V1 findings list (filtered by repository IDs: {self.repository_ids})")
         else:
             self.logger.info("Step 1: Fetching V1 findings list (all repositories)")
-        v1_findings = self.v1_client.get_findings(self.deployment_slug, self.repository_ids)
+        v1_findings = self.v1_client.get_findings(self.deployment_slug, self.repository_ids, self.page_size, self.max_pages)
         
         # Log V1 response for debugging
         v1_data = [finding.model_dump() for finding in v1_findings]

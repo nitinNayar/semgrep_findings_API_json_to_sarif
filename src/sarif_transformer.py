@@ -1,17 +1,19 @@
 """SARIF transformation engine for converting Semgrep findings to SARIF format."""
 
 import logging
-from typing import List, Dict, Any, Optional, Set
+import re
+from typing import List, Dict, Any, Optional, Set, Tuple
 from pathlib import Path
 from urllib.parse import urlparse
 
 from .models import (
     SemgrepV1Finding, SemgrepV2Finding, ProcessedFinding,
-    SemgrepV2Severity, SemgrepV2Confidence,
+    SemgrepV2Severity, SemgrepV2Confidence, SemgrepV2AutoTriageVerdict,
     SARIFReport, SARIFRun, SARIFResult, SARIFLevel,
     SARIFLocation, SARIFPhysicalLocation, SARIFArtifactLocation, SARIFRegion,
     SARIFMessage, SARIFCodeFlow, SARIFThreadFlow, SARIFThreadFlowLocation,
-    SARIFInvocation, SARIFToolExecutionNotification, SARIFTool, SARIFDriver, SARIFRule
+    SARIFInvocation, SARIFToolExecutionNotification, SARIFTool, SARIFDriver, SARIFRule,
+    SARIFSuppression, SARIFFix, SARIFArtifactChange, SARIFReplacement
 )
 
 
@@ -23,13 +25,15 @@ class TransformationError(Exception):
 class SARIFTransformer:
     """Transforms Semgrep findings to SARIF 2.1.0 format."""
     
-    def __init__(self, include_tool_section: bool = True):
+    def __init__(self, deployment_slug: str, include_tool_section: bool = True):
         """Initialize the SARIF transformer.
         
         Args:
+            deployment_slug: Semgrep deployment slug for URL construction
             include_tool_section: Whether to include tool section for GitHub compatibility
         """
         self.logger = logging.getLogger(__name__)
+        self.deployment_slug = deployment_slug
         self.include_tool_section = include_tool_section
     
     def transform(
@@ -148,9 +152,23 @@ class SARIFTransformer:
             level=level,
             message=message,
             locations=[primary_location],
+            guid=finding.v2_finding.id,
             fingerprints=fingerprints,
-            properties=self._create_properties(finding)
+            properties=self._create_ai_enhanced_properties(finding, self.deployment_slug)
         )
+        
+        # Add AI metadata based on autotriage verdict
+        if finding.v2_finding.autotriage:
+            verdict = finding.v2_finding.autotriage.verdict
+            
+            if verdict == SemgrepV2AutoTriageVerdict.FALSE_POSITIVE:
+                # Add suppressions for false positives
+                result.suppressions = self._create_suppressions(finding)
+            
+            elif verdict == SemgrepV2AutoTriageVerdict.TRUE_POSITIVE:
+                # Add fixes for true positives if available
+                if finding.v2_finding.remediation:
+                    result.fixes = self._create_fixes(finding)
         
         # Add dataflow information if available
         if finding.has_dataflow_trace:
@@ -201,18 +219,246 @@ class SARIFTransformer:
         
         return SARIFLocation(physicalLocation=physical_location)
     
-    def _create_properties(self, finding: ProcessedFinding) -> Dict[str, Any]:
-        """Create properties bag for SARIF result.
+    def _build_semgrep_ui_url(self, finding_id: str, deployment_slug: str) -> str:
+        """Build URL to Semgrep UI for the finding.
         
-        Based on expected SARIF format, properties should be empty.
+        Args:
+            finding_id: Semgrep finding ID
+            deployment_slug: Deployment slug identifier
+            
+        Returns:
+            URL to finding in Semgrep UI
+        """
+        return f"https://semgrep.dev/orgs/{deployment_slug}/findings/{finding_id}"
+    
+    def _create_ai_enhanced_properties(self, finding: ProcessedFinding, deployment_slug: str) -> Dict[str, Any]:
+        """Create AI-enhanced properties bag for SARIF result.
         
         Args:
             finding: Combined finding data
+            deployment_slug: Deployment slug for URL construction
             
         Returns:
-            Empty properties dictionary
+            Properties dictionary with AI verification metadata and Semgrep metadata
         """
-        return {}
+        properties = {}
+        
+        # Add AI verification metadata if autotriage is available
+        if finding.v2_finding.autotriage:
+            verdict = finding.v2_finding.autotriage.verdict
+            reason = finding.v2_finding.autotriage.reason or ""
+            
+            if verdict == SemgrepV2AutoTriageVerdict.FALSE_POSITIVE:
+                properties.update({
+                    "verificationStatus": "falsePositive",
+                    "verificationMethod": "automated", 
+                    "verificationConfidence": 0.95,
+                    "aiAnalysisReason": reason
+                })
+            elif verdict == SemgrepV2AutoTriageVerdict.TRUE_POSITIVE:
+                properties.update({
+                    "verificationStatus": "truePositive",
+                    "verificationMethod": "automated",
+                    "verificationConfidence": 0.90,
+                    "aiAnalysisReason": reason
+                })
+            else:  # UNKNOWN or None
+                properties.update({
+                    "verificationStatus": "unknown",
+                    "verificationMethod": "automated",
+                    "verificationConfidence": 0.5
+                })
+        
+        # Add Semgrep-specific metadata
+        properties.update({
+            "semgrepFindingId": finding.v2_finding.id,
+            "semgrepFindingUrl": self._build_semgrep_ui_url(finding.v2_finding.id, deployment_slug)
+        })
+        
+        return properties
+    
+    def _create_suppressions(self, finding: ProcessedFinding) -> List[SARIFSuppression]:
+        """Create SARIF suppressions for false positive findings.
+        
+        Args:
+            finding: Combined finding data with FALSE_POSITIVE verdict
+            
+        Returns:
+            List of SARIF suppressions
+        """
+        reason = finding.v2_finding.autotriage.reason or "AI-detected false positive"
+        
+        suppression = SARIFSuppression(
+            kind="inSource",
+            status="accepted",
+            justification=SARIFMessage(text=reason)
+        )
+        
+        return [suppression]
+    
+    def _parse_unified_diff(self, diff_text: str, base_line: int) -> Tuple[Optional[str], Optional[str]]:
+        """Parse unified diff to extract original and fixed code.
+        
+        Args:
+            diff_text: Unified diff string from Semgrep autofix
+            base_line: Base line number from the finding
+            
+        Returns:
+            Tuple of (original_code, fixed_code) or (None, None) if parsing fails
+        """
+        if not diff_text:
+            return None, None
+            
+        try:
+            lines = diff_text.strip().split('\n')
+            original_lines = []
+            fixed_lines = []
+            
+            for line in lines:
+                if line.startswith('-') and not line.startswith('---'):
+                    # This is the original code (being deleted)
+                    original_lines.append(line[1:] if len(line) > 1 else "")
+                elif line.startswith('+') and not line.startswith('+++'):
+                    # This is the fixed code (being inserted)
+                    fixed_lines.append(line[1:] if len(line) > 1 else "")
+            
+            # Handle both single line and multi-line changes
+            original_code = '\n'.join(original_lines) if original_lines else None
+            fixed_code = '\n'.join(fixed_lines) if fixed_lines else None
+            
+            # Special case: if no original code but there are fixed lines,
+            # this might be an insertion-only diff (like adding to a file)
+            if not original_code and fixed_code:
+                # For insertion-only diffs, use empty string as original
+                original_code = ""
+            
+            # For very complex multi-line changes, truncate for SARIF
+            if fixed_code and len(fixed_code) > 500:
+                fixed_code = fixed_code[:500] + "... (truncated)"
+            
+            return original_code, fixed_code
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to parse unified diff: {e}")
+            return None, None
+    
+    def _create_enhanced_fix_description(self, guidance: Optional[Dict[str, Any]]) -> str:
+        """Create enhanced fix description combining summary and detailed guidance.
+        
+        Args:
+            guidance: Guidance dictionary from remediation data
+            
+        Returns:
+            Enhanced description string combining summary and detailed steps
+        """
+        if not guidance:
+            return "AI-suggested fix based on Semgrep analysis"
+        
+        summary = guidance.get('summary', '').strip()
+        guidance_text = guidance.get('guidanceText', '').strip()
+        
+        # Start with summary
+        if summary and guidance_text:
+            # Combine both for maximum detail
+            enhanced_description = f"{summary}\n\nDetailed Steps:\n{guidance_text}"
+        elif summary:
+            # Only summary available
+            enhanced_description = summary
+        elif guidance_text:
+            # Only detailed text available
+            enhanced_description = f"Remediation Steps:\n{guidance_text}"
+        else:
+            # No guidance content
+            enhanced_description = "AI-suggested fix based on Semgrep analysis"
+        
+        # Apply length limit for SARIF compatibility (keep it reasonable)
+        max_length = 2000
+        if len(enhanced_description) > max_length:
+            # Truncate but try to keep complete sentences
+            truncated = enhanced_description[:max_length]
+            # Find the last sentence boundary
+            last_period = truncated.rfind('. ')
+            if last_period > max_length * 0.7:  # If we can keep most content
+                enhanced_description = truncated[:last_period + 1] + " [Description truncated for length]"
+            else:
+                enhanced_description = truncated + "... [Description truncated for length]"
+        
+        return enhanced_description
+    
+    def _create_fixes(self, finding: ProcessedFinding) -> Optional[List[SARIFFix]]:
+        """Create SARIF fixes from remediation data with populated replacements.
+        
+        Args:
+            finding: Combined finding data with remediation information
+            
+        Returns:
+            List of SARIF fixes or None if no fixes available
+        """
+        if not finding.v2_finding.remediation:
+            return None
+            
+        fixes = []
+        remediation = finding.v2_finding.remediation
+        
+        # Check if autofix is available
+        if remediation.autofix:
+            # Combine guidance summary and detailed text for rich descriptions
+            fix_description = self._create_enhanced_fix_description(remediation.guidance)
+            
+            # Create replacements array from diff data
+            replacements = []
+            
+            if remediation.autofix.get('fixDiff'):
+                # Parse the unified diff to get original and fixed code
+                original_code, fixed_code = self._parse_unified_diff(
+                    remediation.autofix['fixDiff'], 
+                    finding.v2_finding.line
+                )
+                
+                if original_code is not None and fixed_code is not None:
+                    # Calculate region based on finding location
+                    start_line = finding.v2_finding.line
+                    end_line = finding.v2_finding.endLine or start_line
+                    start_column = finding.v2_finding.column or 1
+                    end_column = finding.v2_finding.endColumn or (start_column + len(original_code))
+                    
+                    # Create the replacement
+                    replacement = SARIFReplacement(
+                        deletedRegion=SARIFRegion(
+                            startLine=start_line,
+                            endLine=end_line,
+                            startColumn=start_column,
+                            endColumn=end_column
+                        ),
+                        insertedContent={"text": fixed_code}
+                    )
+                    
+                    replacements.append(replacement)
+                    
+                    # Enhance description with actual change info
+                    if len(fixed_code) < 100:  # Only for short fixes
+                        fix_description += f" (Replace with: {fixed_code})"
+                else:
+                    self.logger.warning(f"Could not parse diff for finding {finding.v1_finding.id}")
+            
+            # Create artifact change with replacements
+            artifact_change = SARIFArtifactChange(
+                artifactLocation=SARIFArtifactLocation(
+                    uri=finding.v2_finding.filePath,
+                    uriBaseId="%SRCROOT%"
+                ),
+                replacements=replacements
+            )
+            
+            # Create the fix
+            fix = SARIFFix(
+                description=SARIFMessage(text=fix_description),
+                artifactChanges=[artifact_change]
+            )
+            
+            fixes.append(fix)
+        
+        return fixes if fixes else None
     
     def _create_code_flows(self, finding: ProcessedFinding) -> List[SARIFCodeFlow]:
         """Create SARIF code flows from dataflow trace with descriptive messages.

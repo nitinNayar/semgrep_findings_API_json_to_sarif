@@ -26,6 +26,10 @@ class Config(BaseModel):
     filter_findings_for_specific_repo_ids: bool = False
     list_of_repo_ids: Optional[List[int]] = None
     
+    # Pagination configuration
+    semgrep_page_size: int = 100  # Number of findings per API page
+    semgrep_max_pages: int = 1000  # Safety limit to prevent infinite loops
+    
     @field_validator('api_token')
     @classmethod
     def validate_api_token(cls, v):
@@ -63,12 +67,25 @@ def load_environment_config() -> Config:
     api_token = os.getenv('SEMGREP_API_TOKEN')
     deployment_slug = os.getenv('SEMGREP_DEPLOYMENT_SLUG')  
     deployment_id = os.getenv('SEMGREP_DEPLOYMENT_ID')
-    output_path = os.getenv('OUTPUT_SARIF_PATH', './output/results.sarif')
+    
+    # Generate dynamic filename with deployment ID and datetime
+    output_path = os.getenv('OUTPUT_SARIF_PATH')
+    if not output_path:
+        # Generate filename format: DEPLOYMENT_ID__YYYYMMDD_HHMMSS.sarif
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        if deployment_id:
+            output_path = f'./output/{deployment_id}__{timestamp}.sarif'
+        else:
+            output_path = f'./output/results_{timestamp}.sarif'
     
     # Extract optional repository filtering variables
     filter_enabled = os.getenv('FILTER_FINDINGS_FOR_SPECIFIC_REPO_IDS', 'false').lower() == 'true'
     repo_ids_str = os.getenv('LIST_OF_REPO_IDS')
     repo_ids_list = None
+    
+    # Extract pagination configuration
+    page_size = int(os.getenv('SEMGREP_PAGE_SIZE', '100'))
+    max_pages = int(os.getenv('SEMGREP_MAX_PAGES', '1000'))
     
     # Parse repository IDs if filtering is enabled
     if filter_enabled:
@@ -108,7 +125,9 @@ def load_environment_config() -> Config:
             deployment_id=deployment_id,
             output_sarif_path=output_path,
             filter_findings_for_specific_repo_ids=filter_enabled,
-            list_of_repo_ids=repo_ids_list
+            list_of_repo_ids=repo_ids_list,
+            semgrep_page_size=page_size,
+            semgrep_max_pages=max_pages
         )
     except ValueError as e:
         raise ConfigurationError(f"Invalid configuration: {e}")

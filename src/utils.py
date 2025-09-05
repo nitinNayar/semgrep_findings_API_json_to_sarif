@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,78 @@ class ConfigurationError(Exception):
     pass
 
 
+class APICallCounter:
+    """Thread-safe counter for tracking API calls with debug logging."""
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._v1_calls = 0
+        self._v2_calls = 0
+        self._debug_enabled = None
+        self._logger = None
+    
+    def _ensure_logger(self):
+        """Ensure logger is initialized and debug state is cached."""
+        if self._logger is None:
+            self._logger = logging.getLogger('semgrep_sarif_converter')
+        if self._debug_enabled is None:
+            self._debug_enabled = os.getenv('DEBUG', 'false').lower() == 'true'
+    
+    def increment_v1_call(self, method: str, url: str) -> int:
+        """Increment V1 API call counter and log if debug is enabled."""
+        self._ensure_logger()
+        with self._lock:
+            self._v1_calls += 1
+            current_count = self._v1_calls
+            
+        if self._debug_enabled:
+            print(f"DEBUG: V1 API Call #{current_count}: {method} {url}")
+            self._logger.debug(f"V1 API Call #{current_count}: {method} {url}")
+            
+        return current_count
+    
+    def increment_v2_call(self, method: str, url: str) -> int:
+        """Increment V2 API call counter and log if debug is enabled."""
+        self._ensure_logger()
+        with self._lock:
+            self._v2_calls += 1
+            current_count = self._v2_calls
+            
+        if self._debug_enabled:
+            print(f"DEBUG: V2 API Call #{current_count}: {method} {url}")
+            self._logger.debug(f"V2 API Call #{current_count}: {method} {url}")
+            
+        return current_count
+    
+    def log_response_debug(self, api_type: str, call_num: int, status_code: int, duration_ms: float):
+        """Log API response details if debug is enabled."""
+        self._ensure_logger()
+        if self._debug_enabled:
+            print(f"DEBUG: {api_type} API Call #{call_num} Response: {status_code} ({duration_ms:.1f}ms)")
+            self._logger.debug(f"{api_type} API Call #{call_num} Response: {status_code} ({duration_ms:.1f}ms)")
+    
+    def get_counts(self) -> Dict[str, int]:
+        """Get current call counts."""
+        with self._lock:
+            return {
+                'v1_calls': self._v1_calls,
+                'v2_calls': self._v2_calls,
+                'total_calls': self._v1_calls + self._v2_calls
+            }
+    
+    def log_summary(self):
+        """Log summary of API calls if debug is enabled."""
+        self._ensure_logger()
+        if self._debug_enabled:
+            counts = self.get_counts()
+            print(f"DEBUG: API Call Summary - V1: {counts['v1_calls']}, V2: {counts['v2_calls']}, Total: {counts['total_calls']}")
+            self._logger.debug(f"API Call Summary - V1: {counts['v1_calls']}, V2: {counts['v2_calls']}, Total: {counts['total_calls']}")
+
+
+# Global API call counter instance
+api_call_counter = APICallCounter()
+
+
 class Config(BaseModel):
     """Configuration model for the Semgrep to SARIF converter."""
     
@@ -25,6 +98,7 @@ class Config(BaseModel):
     output_sarif_path: str = "./output/results.sarif"
     filter_findings_for_specific_repo_ids: bool = False
     list_of_repo_ids: Optional[List[int]] = None
+    debug_enabled: bool = False
     
     # Pagination configuration
     semgrep_page_size: int = 100  # Number of findings per API page
@@ -83,6 +157,9 @@ def load_environment_config() -> Config:
     repo_ids_str = os.getenv('LIST_OF_REPO_IDS')
     repo_ids_list = None
     
+    # Extract debug configuration
+    debug_enabled = os.getenv('DEBUG', 'false').lower() == 'true'
+    
     # Extract pagination configuration
     page_size = int(os.getenv('SEMGREP_PAGE_SIZE', '100'))
     max_pages = int(os.getenv('SEMGREP_MAX_PAGES', '1000'))
@@ -126,6 +203,7 @@ def load_environment_config() -> Config:
             output_sarif_path=output_path,
             filter_findings_for_specific_repo_ids=filter_enabled,
             list_of_repo_ids=repo_ids_list,
+            debug_enabled=debug_enabled,
             semgrep_page_size=page_size,
             semgrep_max_pages=max_pages
         )
@@ -140,23 +218,26 @@ def setup_logging() -> logging.Logger:
     logs_dir = Path('logs')
     logs_dir.mkdir(exist_ok=True)
     
+    # Check if debug mode is enabled
+    debug_enabled = os.getenv('DEBUG', 'false').lower() == 'true'
+    
     # Configure logging
     logger = logging.getLogger('semgrep_sarif_converter')
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG if debug_enabled else logging.INFO)
     
     # Remove any existing handlers to avoid duplicates
     logger.handlers.clear()
     
     # Console handler for immediate feedback
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.DEBUG if debug_enabled else logging.INFO)
     console_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
     
-    # File handler for detailed logs
+    # File handler for detailed logs (always DEBUG level)
     log_file = logs_dir / f"converter_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(logging.DEBUG)
@@ -165,6 +246,9 @@ def setup_logging() -> logging.Logger:
     )
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
+    
+    if debug_enabled:
+        logger.info("DEBUG mode enabled - detailed API call logging active")
     
     return logger
 

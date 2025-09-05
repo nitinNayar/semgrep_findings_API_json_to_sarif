@@ -1,15 +1,43 @@
 # Semgrep to SARIF Converter
 
-A Python application that extracts Semgrep security findings using both V1 and V2 APIs and converts them to SARIF (Static Analysis Results Interchange Format) 2.1.0.
+A Python application that extracts Semgrep security findings using Semgrep APIs and converts them to SARIF (Static Analysis Results Interchange Format) 2.1.0.
 
 ## Features
 
-- **Dual API Integration**: Uses Semgrep V1 API for findings list and V2 API for detailed findings with dataflow traces
-- **SARIF 2.1.0 Compliance**: Generates valid SARIF output with dataflow support (threadFlows)
-- **Environment Configuration**: Simple configuration via `.env` file
-- **Debug Logging**: Comprehensive logging with intermediate JSON files for troubleshooting
+### Core Functionality
+- **Dual API Integration**: Uses Semgrep V1 API for findings list and V2 (Experimental) API for detailed findings with dataflow traces
+- **SARIF 2.1.0 Compliance**: Generates valid SARIF output with schema validation and dataflow support (threadFlows)
+- **Environment Configuration**: Simple configuration via `.env` file with extensive customization options
 - **Dataflow Mapping**: Converts Semgrep dataflow traces to SARIF threadFlows/codeFlows
 - **Field Mapping**: Complete mapping of Semgrep fields to SARIF format per technical specifications
+- **Semgrep AI Analysis Mapping**: Integrates Semgrep AI Assistant metadata for true/false positive detection
+- **Auto-Triage Support**: Processes AI verdict data (VERDICT_TRUE_POSITIVE/VERDICT_FALSE_POSITIVE)
+- **Smart Suppressions**: Automatically handles false positives via SARIF suppressions based on Semgrep AI Assistant generated Triage Guidance
+- **Fix Recommendations**: Maps Semgrep AI Assistant generated fix suggestions to SARIF fixes format
+
+### Repository Management
+- **Repository Filtering**: Filter findings by specific repository IDs for targeted analysis
+- **Multi-Repository Support**: Process findings from selected repositories or all repositories
+- **Dynamic Configuration**: Repository filtering configurable via environment variables
+
+### Advanced Logging & Debugging
+- **Debug Mode**: Comprehensive debug logging with detailed API call tracking
+- **Structured Logging**: Multi-level logging with both console and file outputs
+- **Intermediate JSON Dumps**: Complete API responses saved for troubleshooting
+- **Request/Response Timing**: Detailed timing and status code logging for each API call
+
+### Configuration & Security
+- **Dynamic Filename Generation**: Automatic timestamped SARIF output with deployment information
+- **Pagination Configuration**: Configurable page sizes and limits for large datasets
+- **Security Hardening**: Filename sanitization and path traversal protection
+- **Rate Limit Handling**: Automatic retry with exponential backoff for rate limits
+- **Authentication Management**: Secure token handling with comprehensive error handling
+
+### Error Handling & Resilience
+- **Comprehensive Exception Handling**: Specific exceptions for authentication, rate limits, not found, etc.
+- **HTTP Session Management**: Configured with retry strategies and timeout handling
+- **Schema Validation**: Online SARIF 2.1.0 schema validation with detailed error reporting
+- **Graceful Degradation**: Continues processing even with partial API failures
 
 ## Installation
 
@@ -34,21 +62,88 @@ A Python application that extracts Semgrep security findings using both V1 and V
 
 Create a `.env` file with the following variables:
 
+### Required Variables
 ```bash
-# Required: Semgrep API credentials
-SEMGREP_API_TOKEN=sg_token_xxxxxxxxxxxxx
+# Semgrep API credentials
+SEMGREP_API_TOKEN=xxxxxxxxxxxxx
 SEMGREP_DEPLOYMENT_SLUG=your-deployment-slug  
 SEMGREP_DEPLOYMENT_ID=your-deployment-id
+```
 
-# Optional: Output configuration
+### Optional Configuration
+
+#### Output Configuration
+```bash
+# Output file path (default: auto-generated with timestamp)
+# Format: ./output/DEPLOYMENT_ID__YYYYMMDD_HHMMSS.sarif
 OUTPUT_SARIF_PATH=./output/results.sarif
+```
+
+#### Repository Filtering
+```bash
+# Enable repository filtering (default: false)
+FILTER_FINDINGS_FOR_SPECIFIC_REPO_IDS=false
+
+# Comma-separated list of repository IDs to include (required when filtering is enabled)
+# Example: LIST_OF_REPO_IDS=1,2,3,5,8
+LIST_OF_REPO_IDS=
+```
+
+#### Debug and Logging
+```bash
+# Enable detailed debug logging with API call tracking (default: false)
+DEBUG=true
+```
+
+#### Pagination Configuration
+```bash
+# Number of findings per API page (default: 100)
+SEMGREP_PAGE_SIZE=100
+
+# Maximum pages to process as safety limit (default: 1000)
+SEMGREP_MAX_PAGES=1000
 ```
 
 ### Getting Semgrep Credentials
 
 1. **API Token**: Get from [Semgrep App Settings](https://semgrep.dev/orgs/-/settings/tokens)
-2. **Deployment Slug**: Found in your Semgrep deployment URL
-3. **Deployment ID**: Available in Semgrep deployment settings
+2. **Deployment Slug**: Get from [Semgrep App Settings](https://semgrep.dev/orgs/-/settings/general/identifiers)
+3. **Deployment ID**: Get from [Semgrep App Settings](https://semgrep.dev/orgs/-/settings/general/identifiers)
+
+## Debug Mode
+
+Enable comprehensive debug logging for troubleshooting and monitoring:
+
+```bash
+DEBUG=true
+```
+
+### Debug Features
+
+#### API Call Tracking
+- **Real-time Monitoring**: Thread-safe counter tracks all V1/V2 API calls
+- **Performance Metrics**: Request timing and response status codes
+- **Call Numbering**: Sequential numbering of API calls for correlation
+- **Console Output**: Live debug output during execution
+
+Example debug output:
+```
+DEBUG: V1 API Call #1: GET https://semgrep.dev/api/v1/deployments/example/findings
+DEBUG: V1 API Call #1 Response: 200 (1247.3ms)
+DEBUG: V2 API Call #1: GET https://semgrep.dev/api/agent/deployments/123/issues/v2/456
+DEBUG: V2 API Call #1 Response: 200 (892.1ms)
+```
+
+#### Enhanced Logging
+- **Structured Logging**: Both console and file outputs with different detail levels
+- **Log File Creation**: Timestamped log files in `/logs/converter_YYYYMMDD_HHMMSS.log`
+- **Request Correlation**: Unique correlation IDs for tracing requests
+- **Error Context**: Detailed error information with stack traces
+
+#### JSON Debug Dumps
+All API responses are automatically saved for analysis:
+- `/logs/findings_<deployment_id>_<timestamp>.json` - V1 API response
+- `/logs/findings_details_<deployment_id>_<timestamp>.json` - Aggregated V2 responses
 
 ## Usage
 
@@ -60,125 +155,32 @@ python src/main.py
 
 The converter will:
 1. Read configuration from `.env` file
-2. Fetch findings list from Semgrep V1 API
-3. Log V1 response to `/logs/findings_<deployment_id>_<timestamp>.json`
-4. Fetch detailed findings from Semgrep V2 API for each finding
-5. Log aggregated V2 response to `/logs/findings_details_<deployment_id>_<timestamp>.json`
-6. Transform findings to SARIF 2.1.0 format
-7. Write SARIF output to specified file (default: `./output/results.sarif`)
+2. Apply repository filtering (if enabled)
+3. Fetch findings list from Semgrep V1 API
+4. Log V1 response to `/logs/findings_<deployment_id>_<timestamp>.json`
+5. Fetch detailed findings from Semgrep V2 API for each finding (includes AI metadata)
+6. Log aggregated V2 response to `/logs/findings_details_<deployment_id>_<timestamp>.json`
+7. Transform findings to SARIF 2.1.0 format with AI analysis integration
+8. Write SARIF output with auto-generated filename (format: `deployment_id__YYYYMMDD_HHMMSS.sarif`)
 
-### Output
+### Repository Filtering Examples
 
-- **SARIF File**: Valid SARIF 2.1.0 format at configured path
-- **Debug Logs**: 
-  - `/logs/findings_<deployment_id>_<timestamp>.json` (V1 API response)
-  - `/logs/findings_details_<deployment_id>_<timestamp>.json` (V2 API responses)
-  - `/logs/converter_<timestamp>.log` (Application logs)
-
-## Architecture
-
-### Workflow
-
-```
-.env Config → V1 API (findings list) → V2 API (details) → SARIF Transform → Output File
-     ↓              ↓                      ↓                    ↓
-   Validation    Debug Log              Debug Log           Validation
-```
-
-### Key Components
-
-- **`utils.py`**: Configuration loading and logging utilities
-- **`models.py`**: Pydantic data models for APIs and SARIF
-- **`semgrep_client.py`**: V1 and V2 API clients with error handling
-- **`sarif_transformer.py`**: Core transformation logic
-- **`sarif_validator.py`**: SARIF validation and output handling
-- **`main.py`**: Main workflow orchestration
-
-### Data Mapping
-
-Key field mappings from Semgrep to SARIF:
-
-| Semgrep V2 Field | SARIF Field | Notes |
-|------------------|-------------|-------|
-| `id` | `ruleId` | Rule identifier |
-| `message` | `message.text` | Finding message |
-| `filePath` | `physicalLocation.artifactLocation.uri` | File location |
-| `line`, `column` | `physicalLocation.region.start*` | Position info |
-| `severity` | `level` | HIGH→error, MEDIUM→warning, LOW→note |
-| `dataflowTrace` | `threadFlows` | Dataflow to SARIF codeFlows |
-| `ruleCweNames` | `taxa` | CWE classifications |
-| `ruleOwaspNames` | `taxa` | OWASP classifications |
-
-## Development
-
-### Running Tests
-
+#### Process All Repositories (Default)
 ```bash
-pytest tests/
+# .env configuration
+FILTER_FINDINGS_FOR_SPECIFIC_REPO_IDS=false
+# LIST_OF_REPO_IDS not required
 ```
 
-### Code Formatting
-
+#### Filter for Specific Repositories
 ```bash
-black src/ tests/
+# .env configuration
+FILTER_FINDINGS_FOR_SPECIFIC_REPO_IDS=true
+LIST_OF_REPO_IDS=1,2,3,5,8
+
+# Run converter
+python src/main.py
 ```
 
-### Type Checking
+This will only process findings from repositories with IDs: 1, 2, 3, 5, and 8.
 
-```bash
-mypy src/
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Authentication Error**: Check API token format and permissions
-2. **Deployment Not Found**: Verify deployment slug and ID
-3. **Rate Limiting**: Application handles rate limits automatically with exponential backoff
-4. **Missing Findings**: Check deployment has findings and user has access
-
-### Debug Information
-
-- Check `/logs/` folder for detailed JSON dumps of API responses
-- Application logs include correlation IDs for tracing requests
-- SARIF validation errors show specific schema violations
-
-### Log Files
-
-- `findings_<deployment_id>_<timestamp>.json`: Raw V1 API response
-- `findings_details_<deployment_id>_<timestamp>.json`: All V2 API responses
-- `converter_<timestamp>.log`: Application execution logs
-
-## API Limitations
-
-- **V1 API**: Limited dataflow information, used for findings list
-- **V2 API**: Rich dataflow traces but requires individual calls per finding  
-- **Rate Limiting**: Automatically handled with exponential backoff
-- **Large Datasets**: Processing time scales linearly with finding count
-
-## Security
-
-- API tokens are read from environment variables only
-- No credentials are logged or exposed in output
-- File paths are sanitized to prevent directory traversal
-- HTTPS used for all API communications
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with tests
-4. Run linting and type checking
-5. Submit a pull request
-
-## License
-
-[Add license information]
-
-## Support
-
-For issues and questions:
-1. Check the troubleshooting section
-2. Review debug logs in `/logs/` folder  
-3. Create an issue with log excerpts and configuration (redacted)

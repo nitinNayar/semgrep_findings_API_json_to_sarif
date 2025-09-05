@@ -11,7 +11,7 @@ from requests.exceptions import RequestException, Timeout, HTTPError
 from urllib3.util.retry import Retry
 
 from .models import SemgrepV1Response, SemgrepV1Finding, SemgrepV2Finding
-from .utils import log_json_debug
+from .utils import log_json_debug, api_call_counter
 
 
 class SemgrepAPIError(Exception):
@@ -40,15 +40,17 @@ class NotFoundError(SemgrepAPIError):
 class SemgrepClient:
     """Base client for Semgrep API interactions."""
     
-    def __init__(self, api_token: str, base_url: str = "https://semgrep.dev/api"):
+    def __init__(self, api_token: str, base_url: str = "https://semgrep.dev/api", api_type: str = "Unknown"):
         """Initialize the Semgrep API client.
         
         Args:
             api_token: Semgrep API token (should start with 'sg_')
             base_url: Base URL for Semgrep API
+            api_type: Type of API (V1, V2) for logging purposes
         """
         self.api_token = api_token
         self.base_url = base_url.rstrip('/')
+        self.api_type = api_type
         self.logger = logging.getLogger(__name__)
         
         # Set up session with retries and timeouts
@@ -125,18 +127,46 @@ class SemgrepClient:
         """
         kwargs.setdefault('timeout', self.timeout)
         
+        # Increment API call counter and get call number for debug logging
+        if self.api_type == "V1":
+            call_num = api_call_counter.increment_v1_call(method, url)
+        elif self.api_type == "V2":
+            call_num = api_call_counter.increment_v2_call(method, url)
+        else:
+            call_num = 0  # Unknown API type
+        
+        start_time = time.time()
+        
         try:
             self.logger.debug(f"Making {method} request to: {url}")
             response = self.session.request(method, url, **kwargs)
+            
+            # Calculate duration and log response details
+            duration_ms = (time.time() - start_time) * 1000
+            api_call_counter.log_response_debug(self.api_type, call_num, response.status_code, duration_ms)
+            
             return self._handle_response(response)
         except RateLimitError as e:
+            duration_ms = (time.time() - start_time) * 1000
+            api_call_counter.log_response_debug(self.api_type, call_num, 429, duration_ms)
+            
             self.logger.warning(f"Rate limited, retrying after {e.retry_after} seconds")
             time.sleep(e.retry_after)
+            
+            # Retry the request
+            start_time = time.time()
             response = self.session.request(method, url, **kwargs)
+            duration_ms = (time.time() - start_time) * 1000
+            api_call_counter.log_response_debug(self.api_type, call_num, response.status_code, duration_ms)
+            
             return self._handle_response(response)
         except Timeout as e:
+            duration_ms = (time.time() - start_time) * 1000
+            api_call_counter.log_response_debug(self.api_type, call_num, 0, duration_ms)
             raise SemgrepAPIError(f"Request timeout: {e}")
         except RequestException as e:
+            duration_ms = (time.time() - start_time) * 1000
+            api_call_counter.log_response_debug(self.api_type, call_num, 0, duration_ms)
             raise SemgrepAPIError(f"Request failed: {e}")
 
 
@@ -145,7 +175,7 @@ class SemgrepV1Client(SemgrepClient):
     
     def __init__(self, api_token: str):
         """Initialize V1 API client."""
-        super().__init__(api_token, "https://semgrep.dev/api")
+        super().__init__(api_token, "https://semgrep.dev/api", "V1")
     
     def get_findings(self, deployment_slug: str, repository_ids: Optional[List[int]] = None, page_size: int = 100, max_pages: int = 1000) -> List[SemgrepV1Finding]:
         """Fetch ALL findings for a deployment using V1 API with pagination.
@@ -175,6 +205,8 @@ class SemgrepV1Client(SemgrepClient):
         
         all_findings = []
         page = 0
+        estimated_total_calls = None
+        completed_calls = 0
         
         self.logger.info(f"Starting paginated retrieval with page_size={page_size}")
         
@@ -188,6 +220,7 @@ class SemgrepV1Client(SemgrepClient):
                 
                 try:
                     response_data = self._make_request("GET", base_url, params=params)
+                    completed_calls += 1
                     
                     # Parse response using Pydantic model
                     v1_response = SemgrepV1Response(**response_data)
@@ -195,15 +228,39 @@ class SemgrepV1Client(SemgrepClient):
                     current_page_count = len(v1_response.findings)
                     all_findings.extend(v1_response.findings)
                     
+                    # Estimate total calls needed after first page
+                    if page == 0 and current_page_count == page_size:
+                        # If first page is full, estimate based on pattern
+                        # This is a rough estimate - actual may vary
+                        estimated_total_calls = "unknown (depends on total findings)"
+                        self.logger.info(f"API Progress: V1 calls completed: {completed_calls} (estimation pending)")
+                    elif page == 0:
+                        # First page not full, so likely only one page
+                        estimated_total_calls = 1
+                        self.logger.info(f"API Progress: V1 calls completed: {completed_calls}/{estimated_total_calls}")
+                    else:
+                        # Subsequent pages
+                        if isinstance(estimated_total_calls, int):
+                            self.logger.info(f"API Progress: V1 calls completed: {completed_calls}/{estimated_total_calls}")
+                        else:
+                            self.logger.info(f"API Progress: V1 calls completed: {completed_calls} (total unknown)")
+                    
                     self.logger.info(f"Page {page}: Retrieved {current_page_count} findings (total so far: {len(all_findings)})")
                     
                     # Check if this is the last page
                     if current_page_count < page_size:
+                        # Update final estimate if we didn't know before
+                        if not isinstance(estimated_total_calls, int):
+                            estimated_total_calls = completed_calls
+                        self.logger.info(f"API Progress: V1 calls completed: {completed_calls}/{estimated_total_calls} (final)")
                         self.logger.info(f"Reached last page {page} (got {current_page_count} < {page_size} findings)")
                         break
                     
                     # Check for explicit has_more flag if provided by API
                     if hasattr(v1_response, 'has_more') and v1_response.has_more is False:
+                        if not isinstance(estimated_total_calls, int):
+                            estimated_total_calls = completed_calls
+                        self.logger.info(f"API Progress: V1 calls completed: {completed_calls}/{estimated_total_calls} (final)")
                         self.logger.info(f"API indicated no more pages after page {page}")
                         break
                         
@@ -219,16 +276,16 @@ class SemgrepV1Client(SemgrepClient):
             
             # Final summary
             if repository_ids:
-                self.logger.info(f"PAGINATION COMPLETE: Retrieved {len(all_findings)} total findings from {page + 1} pages (filtered by {len(repository_ids)} repository IDs)")
+                self.logger.info(f"V1 API COMPLETE: {completed_calls} calls made, retrieved {len(all_findings)} total findings from {page + 1} pages (filtered by {len(repository_ids)} repository IDs)")
             else:
-                self.logger.info(f"PAGINATION COMPLETE: Retrieved {len(all_findings)} total findings from {page + 1} pages (all repositories)")
+                self.logger.info(f"V1 API COMPLETE: {completed_calls} calls made, retrieved {len(all_findings)} total findings from {page + 1} pages (all repositories)")
             
             return all_findings
             
         except Exception as e:
             self.logger.error(f"Failed to fetch V1 findings with pagination: {e}")
             if all_findings:
-                self.logger.info(f"Returning partial results: {len(all_findings)} findings retrieved before error")
+                self.logger.info(f"V1 API PARTIAL: {completed_calls} calls made before error, returning {len(all_findings)} findings retrieved")
                 return all_findings
             raise
 
@@ -238,7 +295,7 @@ class SemgrepV2Client(SemgrepClient):
     
     def __init__(self, api_token: str):
         """Initialize V2 API client."""
-        super().__init__(api_token, "https://semgrep.dev/api/agent")
+        super().__init__(api_token, "https://semgrep.dev/api/agent", "V2")
     
     def get_finding_details(self, deployment_id: str, issue_id: str) -> SemgrepV2Finding:
         """Fetch detailed finding information using V2 API.
@@ -282,24 +339,31 @@ class SemgrepV2Client(SemgrepClient):
             List of detailed V2 findings
         """
         detailed_findings = []
-        total_issues = len(issue_ids)
+        total_calls = len(issue_ids)
+        completed_calls = 0
         
-        self.logger.info(f"Fetching V2 details for {total_issues} findings")
+        self.logger.info(f"Fetching V2 details for {total_calls} findings")
+        self.logger.info(f"API Progress: V2 calls planned: {total_calls}")
         
         for i, issue_id in enumerate(issue_ids, 1):
             try:
                 finding = self.get_finding_details(deployment_id, str(issue_id))
                 detailed_findings.append(finding)
+                completed_calls += 1
                 
-                if log_progress and i % 10 == 0:
-                    self.logger.info(f"Progress: {i}/{total_issues} findings processed")
+                # Log progress for every call - keep it simple
+                if log_progress:
+                    self.logger.info(f"API Progress: V2 calls completed: {completed_calls}/{total_calls}")
                     
             except Exception as e:
+                completed_calls += 1  # Still count failed attempts as calls made
                 self.logger.warning(f"Failed to fetch details for issue {issue_id}: {e}")
+                if log_progress:
+                    self.logger.info(f"API Progress: V2 calls completed: {completed_calls}/{total_calls} (last call failed)")
                 # Continue processing other findings even if one fails
                 continue
         
-        self.logger.info(f"Successfully retrieved details for {len(detailed_findings)}/{total_issues} findings")
+        self.logger.info(f"V2 API COMPLETE: {completed_calls}/{total_calls} calls made, retrieved {len(detailed_findings)} successful results")
         
         return detailed_findings
 
@@ -353,8 +417,11 @@ class SemgrepAPIFacade:
         v1_data = [finding.model_dump() for finding in v1_findings]
         log_json_debug({"findings": v1_data}, f"findings_{self.deployment_id}")
         
-        # Step 3 & 4: V2 API calls and logging
+        # Step 3 & 4: V2 API calls and logging with summary
+        v2_calls_needed = len(v1_findings)
         self.logger.info("Step 2: Fetching V2 detailed findings")
+        self.logger.info(f"API Summary: Total calls planned - V1: estimated (unknown until complete) + V2: {v2_calls_needed}")
+        
         issue_ids = [str(finding.id) for finding in v1_findings]
         v2_findings = self.v2_client.get_all_finding_details(self.deployment_id, issue_ids)
         
@@ -362,6 +429,17 @@ class SemgrepAPIFacade:
         v2_data = [finding.model_dump() for finding in v2_findings]
         log_json_debug(v2_data, f"findings_details_{self.deployment_id}")
         
-        self.logger.info(f"Workflow complete: {len(v1_findings)} V1 findings, {len(v2_findings)} V2 details")
+        # Final summary
+        total_v2_calls_made = v2_calls_needed  # All calls attempted (includes failures)
+        successful_v2_results = len(v2_findings)
+        
+        self.logger.info(f"API Summary: Workflow complete")
+        self.logger.info(f"  - V1 findings retrieved: {len(v1_findings)}")
+        self.logger.info(f"  - V2 calls made: {total_v2_calls_made}")
+        self.logger.info(f"  - V2 successful results: {successful_v2_results}")
+        self.logger.info(f"  - V2 success rate: {(successful_v2_results/total_v2_calls_made*100):.1f}%" if total_v2_calls_made > 0 else "  - V2 success rate: N/A")
+        
+        # Log final API call summary in debug mode
+        api_call_counter.log_summary()
         
         return v1_findings, v2_findings

@@ -44,7 +44,7 @@ A Python application that extracts Semgrep security findings using Semgrep APIs 
 1. **Clone the repository**:
    ```bash
    git clone <repository-url>
-   cd semgrep-sarif-converter
+   cd semgrep_findings_API_json_to_sarif
    ```
 
 2. **Install dependencies**:

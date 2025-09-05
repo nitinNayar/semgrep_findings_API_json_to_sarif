@@ -1,4 +1,4 @@
-# Semgrep to SARIF Converter
+# Semgrep Findings to SARIF Converter using Semgrep API
 
 A Python application that extracts Semgrep security findings using Semgrep APIs and converts them to SARIF (Static Analysis Results Interchange Format) 2.1.0.
 
